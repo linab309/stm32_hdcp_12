@@ -1,0 +1,257 @@
+/**
+	******************************************************************************
+	* @file    Project/STM32F10x_StdPeriph_Template/main.c 
+	* @author  MCD Application Team
+	* @version V3.3.0
+	* @date    04/16/2010
+	* @brief   Main program body
+	******************************************************************************
+	* @copy
+	*
+	* THE PRESENT FIRMWARE WHICH IS FOR GUIDANCE ONLY AIMS AT PROVIDING CUSTOMERS
+	* WITH CODING INFORMATION REGARDING THEIR PRODUCTS IN ORDER FOR THEM TO SAVE
+	* TIME. AS A RESULT, STMICROELECTRONICS SHALL NOT BE HELD LIABLE FOR ANY
+	* DIRECT, INDIRECT OR CONSEQUENTIAL DAMAGES WITH RESPECT TO ANY CLAIMS ARISING
+	* FROM THE CONTENT OF SUCH FIRMWARE AND/OR THE USE MADE BY CUSTOMERS OF THE
+	* CODING INFORMATION CONTAINED HEREIN IN CONNECTION WITH THEIR PRODUCTS.
+	*
+	* <h2><center>&copy; COPYRIGHT 2010 STMicroelectronics</center></h2>
+	*/ 
+
+/* Includes ------------------------------------------------------------------*/
+#include "stm32f10x.h"
+#include <Utilities.h>
+#include "spi.h"
+#include "simple_server.h"
+#include "stm32f10x_conf.h"
+#include <stdio.h>
+
+
+/* Private typedef -----------------------------------------------------------*/
+/* Private define ------------------------------------------------------------*/
+
+/* Private macro -------------------------------------------------------------*/
+/* Private variables ---------------------------------------------------------*/
+unsigned char mymac[6] = {0};//use STM32 divece UID as mac
+
+void GPIO_Configuration(void);
+void USART1_Config(void);
+
+GPIO_InitTypeDef GPIO_InitStructure;
+USART_InitTypeDef USART_InitStructure;
+
+uint8_t RxBuffer1[256] = {0};
+int RxCounter1 = 0x00; 
+int RxTime = 0;
+
+int timeCnt = 0;
+void test();
+void TimerInit();
+
+/* Private functions ---------------------------------------------------------*/
+
+/**
+	* @brief  Main program.
+	* @param  None
+	* @retval None
+	*/
+int main(void)
+{
+	unsigned char *pUID = (unsigned char *)0x1FFFF7E8;
+	int i;
+	NVIC_InitTypeDef NVIC_InitStructure;
+
+	/* GPIO管脚初始化 */
+	GPIO_Configuration();
+
+	TimerInit();
+
+	/* Enable the USART1 Interrupt */
+	NVIC_InitStructure.NVIC_IRQChannel = USART1_IRQn;
+	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_Init(&NVIC_InitStructure);
+
+	/*串口初始化*/
+	USART1_Config();
+
+	/*SPI1接口初始化*/
+	SPI1_Init();
+	
+	for(i=6;i<12;i++)
+		mymac[i-6] = pUID[i];
+	printf("mymac=\r\n");
+	for(i=0;i<6;i++)
+		printf("%02x ",mymac[i]);
+	printf("\r\n");
+	/*初始化ENC28J60*/
+	enc28j60Init(mymac);	
+
+	printf("----------------------------------------------\r\n");
+	printf("测试程序\r\n");
+
+	//test();
+
+	/*ENC28J60初始化以及Server程序*/
+	simple_server();
+
+}
+void TimerInit()
+{
+	NVIC_InitTypeDef NVIC_InitStructure;
+	TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
+	
+    NVIC_InitStructure.NVIC_IRQChannel = TIM4_IRQn;
+	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 2;  // 指定抢占式优先级级别
+	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;//指定响应优先级级别
+	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_Init(&NVIC_InitStructure);
+
+	/* Time base configuration */
+	TIM_TimeBaseStructure.TIM_Period = 7866;// 359;          
+	TIM_TimeBaseStructure.TIM_Prescaler = 0;       
+	TIM_TimeBaseStructure.TIM_ClockDivision = 0;    
+	TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up; 
+
+	TIM_TimeBaseInit(TIM4, &TIM_TimeBaseStructure); 
+
+	/* TIM IT enable */
+	TIM_ITConfig(TIM4, TIM_IT_CC1, ENABLE);
+
+	/* TIM Disable counter */
+	TIM_Cmd(TIM4, ENABLE);
+}
+void test()
+{
+	int quickCnt = 0,slowCnt = 0,tmp;
+	char ledCtrl = 0;
+	char dhcp_step = 0;
+	int hdcp_time = 0;
+	int i;
+    while(1)
+    {
+		quickCnt++;
+		tmp = quickCnt / 60000 %2;
+		if(ledCtrl != tmp)
+		{
+			ledCtrl = tmp;
+			slowCnt++;
+			if(ledCtrl)
+				GPIO_ResetBits(GPIOF, GPIO_Pin_7);
+			else
+				GPIO_SetBits(GPIOF, GPIO_Pin_7);
+
+		}
+		//if(dhcp_step == 0)
+		if(hdcp_time < slowCnt)
+		{
+			dhcp_step = 1;
+			////start DHCP discover
+			
+			
+			hdcp_time = slowCnt + 4;
+			printf("t=%d\r\n",timeCnt);
+			if(RxCounter1 != 0)
+			{
+				printf("receive=%d\r\n",RxCounter1);
+				for(i=0;i<RxCounter1;i++)
+					printf("%02x ",RxBuffer1[i]);
+				printf("\r\n");
+			}
+		}
+    }
+
+}
+
+/*GPIO接口初始化*/
+void GPIO_Configuration(void)
+{
+	//使用到的资源时钟使能
+	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1|RCC_APB2Periph_GPIOA
+												|RCC_APB2Periph_GPIOC|RCC_APB2Periph_GPIOF, ENABLE);
+		
+	/*LED灯初始化*/
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_6|GPIO_Pin_7|GPIO_Pin_8|GPIO_Pin_9;	//DS1--4 
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(GPIOF, &GPIO_InitStructure);
+
+	/*串口1使用的GPIO管脚初始化*/
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_9;	         //USART1 TX
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;    //复用推挽输出
+	GPIO_Init(GPIOA, &GPIO_InitStructure);		    //A端口 
+
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_10;	         //USART1 RX
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;   //复用开漏输入
+	GPIO_Init(GPIOA, &GPIO_InitStructure);		         //A端口 
+
+	/*SPI FLASH 的CS信号初始化*/
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_4;		    //SPI FLASH CS
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
+	GPIO_Init(GPIOC, &GPIO_InitStructure);
+	
+	/*由于SPI FLASH与ENC28J60使用了相同的SPI接口，所有置高SPI FLASH的CS信号，不使能SPI FLASH*/
+	GPIO_SetBits(GPIOC, GPIO_Pin_4);			         //SPI CS1
+
+	/*ENC28J60的INT中断输入初始化*/
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_2;	        
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPD;   
+	GPIO_Init(GPIOC, &GPIO_InitStructure);		         
+}
+
+
+/*串口1初始化*/
+void USART1_Config(void){
+	/* USART configured as follow:
+				- BaudRate = 115200 baud  
+				- Word Length = 8 Bits
+				- One Stop Bit
+				- No parity
+				- Hardware flow control disabled (RTS and CTS signals)
+				- Receive and transmit enabled
+	*/
+	USART_InitStructure.USART_BaudRate = 115200;
+	USART_InitStructure.USART_WordLength = USART_WordLength_8b;
+	USART_InitStructure.USART_StopBits = USART_StopBits_1;
+	USART_InitStructure.USART_Parity = USART_Parity_No;
+	USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
+	USART_InitStructure.USART_Mode = USART_Mode_Rx | USART_Mode_Tx;
+
+	/* Configure USART1 */
+	USART_Init(USART1, &USART_InitStructure);
+
+	USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
+	//USART_ITConfig(USART1, USART_IT_TXE, ENABLE);
+	/* Enable the USART1 */
+	USART_Cmd(USART1, ENABLE);
+}
+
+
+#ifdef  USE_FULL_ASSERT
+
+/**
+	* @brief  Reports the name of the source file and the source line number
+	*   where the assert_param error has occurred.
+	* @param  file: pointer to the source file name
+	* @param  line: assert_param error line source number
+	* @retval None
+	*/
+void assert_failed(uint8_t* file, uint32_t line)
+{ 
+	/* User can add his own implementation to report the file name and line number,
+		 ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+
+	/* Infinite loop */
+	while (1)
+	{
+	}
+}
+#endif
+
+/**
+	* @}
+	*/
+
+
+/******************* (C) COPYRIGHT 2010 STMicroelectronics *****END OF FILE****/

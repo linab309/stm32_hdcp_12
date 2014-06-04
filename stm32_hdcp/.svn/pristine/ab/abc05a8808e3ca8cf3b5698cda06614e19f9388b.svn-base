@@ -1,0 +1,738 @@
+
+
+#include <string.h>
+#include "enc28j60.h"
+#include "ip_arp_udp_tcp.h"
+#include "net.h"
+#include "simple_server.h"
+#include "stdio.h"
+#include "stm32f10x_it.h"
+#include "eeprom.h"
+#define PSTR(s) s
+extern  void USART_OUT(USART_TypeDef* USARTx, uint8_t *Data,uint16_t Len);
+
+
+// please modify the following two lines. mac and ip have to be unique
+// in your local area network. You can not have the same numbers in
+// two devices:
+static unsigned char myip[4] = {192,168,1,250};
+extern unsigned char mymac[6];
+
+// base url (you can put a DNS name instead of an IP addr. if you have
+// a DNS server (baseurl must end in "/"):
+static char baseurl[]="http://192.168.1.250/";
+static unsigned int mywwwport = 13501; // listen port for tcp/www (max range 1-254)
+// or on a different port:
+//static char baseurl[]="http://10.0.0.24:88/";
+//static unsigned int mywwwport =88; // listen port for tcp/www (max range 1-254)
+//
+static unsigned int myudpport =1200; // listen port for udp
+// how did I get the mac addr? Translate the first 3 numbers into ascii is: TUX
+
+#define BUFFER_SIZE 1500//400
+static unsigned char buf[BUFFER_SIZE+1] = {0};
+
+#define MAX_SYNC_PROCESS	10	//最大支持的同时操作的数目，不是做多支持的连接数
+static unsigned char buf1[BUFFER_SIZE+1];
+unsigned char RxBuffer2Copy[256] = {0};
+unsigned int RxCounter2Copy = 0;
+
+
+extern unsigned int timeCnt ;
+// 
+unsigned char lock_usart2 = 0;
+unsigned int who_use_usart2 = 0;
+
+#define MAX_DEVICE_NUM		256
+#define MAX_GROUP_NUM		MAX_DEVICE_NUM
+
+
+
+#define DEVICE_NAME_BYTES		16
+#define GROUP_NAME_BYTES		16
+
+
+
+
+
+typedef struct{
+	unsigned char isUsed;
+	unsigned short addr;
+	unsigned short groupId;
+	unsigned char lightBrightness;
+	unsigned char lightYellow;
+	unsigned char lightR;
+	unsigned char lightG;
+	unsigned char lightB;
+	unsigned char crc8;
+	unsigned char name[DEVICE_NAME_BYTES];
+	unsigned char reserved[4];
+}DEVICE_INFO;
+DEVICE_INFO deviceInfo[MAX_DEVICE_NUM] = {0};
+unsigned char groupName[MAX_GROUP_NUM][GROUP_NAME_BYTES] = {0};
+unsigned short groupIdWeight[MAX_GROUP_NUM];//inited in code
+#define UART_PROTOCOL_CMDID_START			2
+#define UART_PROTOCOL_DATA_START				4
+
+#define DEVICE_ITEM_BYTES	30
+#define MAX_READ_ITEM_NUM	((256-10)/DEVICE_ITEM_BYTES)
+#define MapRetCmdId(x)		(0x8000+x)
+const char CRC8Table[]={
+  0, 94, 188, 226, 97, 63, 221, 131, 194, 156, 126, 32, 163, 253, 31, 65,
+  157, 195, 33, 127, 252, 162, 64, 30, 95, 1, 227, 189, 62, 96, 130, 220,
+  35, 125, 159, 193, 66, 28, 254, 160, 225, 191, 93, 3, 128, 222, 60, 98,
+  190, 224, 2, 92, 223, 129, 99, 61, 124, 34, 192, 158, 29, 67, 161, 255,
+  70, 24, 250, 164, 39, 121, 155, 197, 132, 218, 56, 102, 229, 187, 89, 7,
+  219, 133, 103, 57, 186, 228, 6, 88, 25, 71, 165, 251, 120, 38, 196, 154,
+  101, 59, 217, 135, 4, 90, 184, 230, 167, 249, 27, 69, 198, 152, 122, 36,
+  248, 166, 68, 26, 153, 199, 37, 123, 58, 100, 134, 216, 91, 5, 231, 185,
+  140, 210, 48, 110, 237, 179, 81, 15, 78, 16, 242, 172, 47, 113, 147, 205,
+  17, 79, 173, 243, 112, 46, 204, 146, 211, 141, 111, 49, 178, 236, 14, 80,
+  175, 241, 19, 77, 206, 144, 114, 44, 109, 51, 209, 143, 12, 82, 176, 238,
+  50, 108, 142, 208, 83, 13, 239, 177, 240, 174, 76, 18, 145, 207, 45, 115,
+  202, 148, 118, 40, 171, 245, 23, 73, 8, 86, 180, 234, 105, 55, 213, 139,
+  87, 9, 235, 181, 54, 104, 138, 212, 149, 203, 41, 119, 244, 170, 72, 22,
+  233, 183, 85, 11, 136, 214, 52, 106, 43, 117, 151, 201, 74, 20, 246, 168,
+  116, 42, 200, 150, 21, 75, 169, 247, 182, 232, 10, 84, 215, 137, 107, 53
+};
+
+unsigned char CRC8_Table(unsigned char *p, char counter)
+{
+    unsigned char crc8 = 0;
+
+    for( ; counter > 0; counter--){
+        crc8 = CRC8Table[crc8^*p];
+        p++;
+    }
+    return(crc8);
+
+}
+
+unsigned char CalcChecksum(unsigned char*buf,unsigned char len)
+{
+	unsigned short checksum = 0;
+	unsigned short i;
+	for(i=0;i<len;i++)
+		checksum += buf[i];
+	return checksum & 0xff;
+}
+
+void usart2_send(unsigned char *buf,unsigned int len)
+{
+	int i;
+
+	lock_usart2 = 1;
+
+	len = buf[2] + 2;
+
+	for(i=0;i<len;i++)
+	{
+		USART2->DR = (uint8_t)buf[i + 2];
+
+		/* Loop until the end of transmission */
+		//while (USART_GetFlagStatus(EVAL_COM1, USART_FLAG_TC) == RESET)/*等待发送完成*/
+		while( ! ((USART2->SR>>6) & 0x01))
+		{
+
+		}
+	}
+}
+////buf复用,len为你的数据长度，不考虑头(len)、尾(crc)
+void UartControlSend(unsigned char*buf,unsigned char dataLen)
+{
+	//if(len + 2 >SERIAL_APP_TX_MAX)
+	//	;//error
+	buf[0] = 0xAA;
+	buf[1] = dataLen;
+	buf[2 + dataLen] = CalcChecksum(&buf[UART_PROTOCOL_DATA_START],dataLen);
+	buf[3 + dataLen] = 0x55;
+	usart2_send(buf,dataLen+4);
+}
+void PrintDeviceList()
+{
+	int i;
+	printf("device list=\r\n");
+	for(i=0;i<MAX_DEVICE_NUM;i++)
+		if(deviceInfo[i].isUsed)
+		{
+			memcpy(buf1,deviceInfo[i].name,DEVICE_NAME_BYTES);
+			buf1[DEVICE_NAME_BYTES] = 0;
+			printf("info[%d]=%04x,%d,%s\r\n",i,deviceInfo[i].addr,deviceInfo[i].groupId,buf1);
+		}
+}
+void ProcessUartMsg(unsigned char *buf,unsigned int len)
+{
+	unsigned short cmdId = *(unsigned short*)(buf+UART_PROTOCOL_CMDID_START);
+	int i;
+	//check valid
+
+	switch(cmdId)
+	{
+	case 0x8001:
+		break;
+	case 0x9001:
+		printf("zd0 start\r\n");
+		break;
+	case 0x9010:
+		{
+			unsigned char isFind = 0;
+			unsigned short addr = *(unsigned short*)(buf+UART_PROTOCOL_DATA_START);
+			int firstNullPos = -1;
+			for(i=0;i<MAX_DEVICE_NUM;i++)
+				if(deviceInfo[i].isUsed)
+				{
+					if(deviceInfo[i].addr == addr)
+					{
+						printf("addr[%x] already exist\r\n",addr);
+						isFind = 1;
+						break;
+					}
+				}
+				else
+				{
+					if(firstNullPos == -1)
+						firstNullPos = i;
+				}
+			printf("isFind=%d\r\n",isFind);
+			if( ! isFind)
+			{
+				printf("firstNullPos=%d\r\n",firstNullPos);
+				if(firstNullPos != -1)
+				{
+					unsigned short groupId = *(unsigned short*)(buf+UART_PROTOCOL_DATA_START+2);
+					memset(&deviceInfo[firstNullPos],0,sizeof(deviceInfo[firstNullPos]));
+					deviceInfo[firstNullPos].isUsed = TRUE;
+					deviceInfo[firstNullPos].addr = addr;
+					deviceInfo[firstNullPos].groupId = groupId;
+					memcpy(deviceInfo[firstNullPos].name,buf+UART_PROTOCOL_DATA_START+4,DEVICE_NAME_BYTES);
+					deviceInfo[firstNullPos].lightBrightness = buf[UART_PROTOCOL_DATA_START+20];
+					deviceInfo[firstNullPos].lightYellow = buf[UART_PROTOCOL_DATA_START+21];
+					deviceInfo[firstNullPos].lightR = buf[UART_PROTOCOL_DATA_START+22];
+					deviceInfo[firstNullPos].lightG = buf[UART_PROTOCOL_DATA_START+23];
+					deviceInfo[firstNullPos].lightB = buf[UART_PROTOCOL_DATA_START+24];
+					memcpy(deviceInfo[firstNullPos].reserved,buf+UART_PROTOCOL_DATA_START+24,4);
+					deviceInfo[firstNullPos].crc8 = CRC8_Table((unsigned char *)&deviceInfo[firstNullPos],sizeof(deviceInfo[firstNullPos]));
+
+					if(groupId != 0)
+					{
+						//change groupid weight
+						for(i=1;i<MAX_GROUP_NUM;i++)
+							if(i != groupId && groupIdWeight[i] != 0)
+								groupIdWeight[i]--;
+						groupIdWeight[firstNullPos] = 0xffff;
+					}
+					PrintDeviceList();
+				}
+				else
+				{
+					printf("error addr list if full\r\n");
+				}
+			}
+		}
+		break;
+	default:
+		break;
+	}
+	
+}
+void TcpSend(unsigned char *buf,int dat_p,int dataLen)
+{
+	int i;
+	buf[dat_p+0] = 0xAA;
+	buf[dat_p+1] = dataLen;
+
+	buf[dat_p+2+dataLen] = CalcChecksum(&buf[dat_p+2], dataLen);
+	buf[dat_p+3+dataLen] = 0x55;
+	//printf("send test error code\r\n");
+	make_tcp_ack_with_data(buf,dataLen+4); // send data
+}
+void TcpSendCmd(unsigned char *buf,int dat_p,unsigned short cmdID,int dataLen)
+{
+	buf[dat_p+UART_PROTOCOL_CMDID_START] = cmdID;
+	buf[dat_p+UART_PROTOCOL_CMDID_START+1] = cmdID>>8;
+	TcpSend(buf,dat_p,dataLen+2);
+}
+void ProcessTcpMsg(unsigned char *buf,int dat_p)
+{
+	int i;
+	unsigned short cmdID = *(unsigned short*)(buf+dat_p+UART_PROTOCOL_CMDID_START);
+	unsigned char dataLen = buf[dat_p + 1];
+	switch(cmdID)
+	{
+	case 0x0001://read nv items
+	case 0x0003://send control cmds to endDevices
+	case 0x0012://read device name from endDevice
+	case 0x0014://start read group id from endDevice
+	case 0x0030://endDevice control
+	case 0x0040://group control
+	case 0x0050://broadcast control
+		{
+			usart2_send(buf+dat_p,dataLen+4);
+		}
+		break;
+	case 0x0002://read device list
+		{
+			////in:		startIndex[2],MaxReadLength[2]
+			////out:	startIndex[2],ReadedLength[2],item_len[i],item_info[i]
+			////		if item_len[i] == 1,means null item,only crc8
+			unsigned short startIndex = *(unsigned short*)(buf+dat_p+UART_PROTOCOL_DATA_START);
+			unsigned short MaxReadLength = *(unsigned short*)(buf+dat_p+UART_PROTOCOL_DATA_START+2);
+			int nReadedLength = 0;
+			int retCmdID = 0x0202;
+			unsigned char infoLen = (14 + DEVICE_NAME_BYTES);
+
+
+			for(i=startIndex;i<MAX_DEVICE_NUM;i++)
+			{
+				if(deviceInfo[i].isUsed)
+				{
+					int itemStartIndex = dat_p+UART_PROTOCOL_DATA_START+4+nReadedLength;
+					if(nReadedLength + (infoLen + 1) >= MaxReadLength)
+						break;
+					buf[itemStartIndex+0] = infoLen;
+					buf[itemStartIndex+1] = deviceInfo[i].addr;
+					buf[itemStartIndex+2] = deviceInfo[i].addr>>8;
+					buf[itemStartIndex+3] = deviceInfo[i].groupId;
+					buf[itemStartIndex+4] = deviceInfo[i].groupId>>8;
+					memcpy(&buf[itemStartIndex+5] , deviceInfo[i].name,DEVICE_NAME_BYTES);
+					buf[itemStartIndex+5+DEVICE_NAME_BYTES] = deviceInfo[i].lightBrightness;
+					buf[itemStartIndex+6+DEVICE_NAME_BYTES] = deviceInfo[i].lightYellow;
+					buf[itemStartIndex+7+DEVICE_NAME_BYTES] = deviceInfo[i].lightG;
+					buf[itemStartIndex+8+DEVICE_NAME_BYTES] = deviceInfo[i].lightG;
+					buf[itemStartIndex+9+DEVICE_NAME_BYTES] = deviceInfo[i].lightB;
+					buf[itemStartIndex+10+DEVICE_NAME_BYTES] = deviceInfo[i].crc8;
+					memcpy(&buf[itemStartIndex+11+DEVICE_NAME_BYTES] , deviceInfo[i].reserved,4);
+
+					nReadedLength += (infoLen + 1);
+				}
+				else
+				{
+					int itemStartIndex = dat_p+UART_PROTOCOL_DATA_START+4+nReadedLength;
+					if(nReadedLength + 2 >= MaxReadLength)
+						break;
+					buf[itemStartIndex+0] = 1;
+					buf[itemStartIndex+1] = deviceInfo[i].crc8;
+					nReadedLength += 2;
+				}
+			}
+			buf[dat_p+UART_PROTOCOL_DATA_START+0] = startIndex;
+			buf[dat_p+UART_PROTOCOL_DATA_START+1] = startIndex>>8;
+			buf[dat_p+UART_PROTOCOL_DATA_START+2] = nReadedLength;
+			buf[dat_p+UART_PROTOCOL_DATA_START+3] = nReadedLength>>8;
+
+			//printf("send test error code\r\n");
+			TcpSendCmd(buf,dat_p,MapRetCmdId(cmdID),4+ nReadedLength);
+		}
+		break;
+	case 0x0010://set device name
+		{
+			// addr[2],name[16]
+			unsigned short addr = *(unsigned short*)(buf+dat_p+UART_PROTOCOL_DATA_START);
+			for(i=0;i<MAX_DEVICE_NUM;i++)
+			{
+				if(deviceInfo[i].isUsed && deviceInfo[i].addr == addr)
+				{
+					memcpy(deviceInfo[i].name,buf+dat_p+UART_PROTOCOL_DATA_START+2,DEVICE_NAME_BYTES);
+					break;
+				}
+			}
+			usart2_send(buf+dat_p,dataLen+4);
+		}
+		break;
+	case 0x0011://read device name
+		{
+			////in:		addr[2]
+			////out:	errCode[2],addr[2],name[DEVICE_NAME_BYTES_GEN]
+			unsigned short addr = *(unsigned short*)(buf+dat_p+UART_PROTOCOL_DATA_START);
+			unsigned char isFind = FALSE;
+			unsigned short errCode = 0;
+			for(i=0;i<MAX_DEVICE_NUM;i++)
+			{
+				if(deviceInfo[i].isUsed && deviceInfo[i].addr == addr)
+				{
+					memcpy(buf+dat_p+UART_PROTOCOL_DATA_START+4,deviceInfo[i].name,DEVICE_NAME_BYTES);
+					isFind = TRUE;
+					break;
+				}
+			}
+			if( ! isFind)
+				errCode = 1;
+			buf[dat_p+UART_PROTOCOL_DATA_START+0] = errCode;
+			buf[dat_p+UART_PROTOCOL_DATA_START+1] = errCode>>8;
+			buf[dat_p+UART_PROTOCOL_DATA_START+2] = addr;
+			buf[dat_p+UART_PROTOCOL_DATA_START+3] = addr>>8;
+
+			//printf("send test error code\r\n");
+			TcpSendCmd(buf,dat_p,MapRetCmdId(cmdID),4+ DEVICE_ITEM_BYTES);
+		}
+		break;
+	case 0x0013://read group id 
+		{
+			////in:		addr[2]
+			////out:	errCode[2],addr[2],groupId[2]
+			unsigned short addr = *(unsigned short*)(buf+dat_p+UART_PROTOCOL_DATA_START);
+			unsigned char isFind = FALSE;
+			unsigned short errCode = 0;
+			for(i=0;i<MAX_DEVICE_NUM;i++)
+			{
+				if(deviceInfo[i].isUsed && deviceInfo[i].addr == addr)
+				{
+					buf[dat_p+UART_PROTOCOL_DATA_START+4] = deviceInfo[i].groupId;
+					buf[dat_p+UART_PROTOCOL_DATA_START+5] = deviceInfo[i].groupId>>8;
+					isFind = TRUE;
+					break;
+				}
+			}
+			if( ! isFind)
+				errCode = 1;
+			buf[dat_p+UART_PROTOCOL_DATA_START+0] = errCode;
+			buf[dat_p+UART_PROTOCOL_DATA_START+1] = errCode>>8;
+			buf[dat_p+UART_PROTOCOL_DATA_START+2] = addr;
+			buf[dat_p+UART_PROTOCOL_DATA_START+3] = addr>>8;
+
+			//printf("send test error code\r\n");
+			TcpSendCmd(buf,dat_p,MapRetCmdId(cmdID),6);
+		}
+		break;
+	case 0x0020://create group,	return group id
+		{
+			////in:		addr[2],group name[16]
+			////out:	errCode[2],groupId[2]
+			unsigned short addr = *(unsigned short*)(buf+dat_p+UART_PROTOCOL_DATA_START);
+			unsigned short groupID = 1;
+			////alloc new group ID
+			{
+				unsigned short minGroupIdWeight = 0xffff;
+				for(i=1;i<MAX_GROUP_NUM;i++)
+					if(minGroupIdWeight > groupIdWeight[i])
+					{
+						minGroupIdWeight = groupIdWeight[i];
+						groupID = i;
+					}
+				groupIdWeight[groupID] = 0xffff;
+			}
+			memcpy(groupName[groupID],buf+dat_p+UART_PROTOCOL_DATA_START+2,GROUP_NAME_BYTES);
+			{
+				int itemPerPage = (PAGE_SIZE/GROUP_NAME_BYTES);
+				int page = groupID/itemPerPage;
+				EE_WriteData(EEPROM_START_ADDRESS+PAGE_SIZE*page,groupName[page*itemPerPage],PAGE_SIZE);
+			}
+			for(i=0;i<MAX_DEVICE_NUM;i++)
+			{
+				if(deviceInfo[i].isUsed && deviceInfo[i].addr == addr)
+				{
+					deviceInfo[i].groupId = groupID;
+					break;
+				}
+			}
+			buf[dat_p+UART_PROTOCOL_DATA_START+2] = groupID;
+			buf[dat_p+UART_PROTOCOL_DATA_START+3] = groupID>>8;
+			UartControlSend(buf+dat_p+UART_PROTOCOL_DATA_START,4);
+		}
+		break;
+	case 0x0021://add to a group
+		{
+			////in:		addr[2],group ID[16]
+			////out:	errCode[2]
+			unsigned short addr = *(unsigned short*)(buf+dat_p+UART_PROTOCOL_DATA_START);
+			unsigned short groupID = *(unsigned short*)(buf+dat_p+UART_PROTOCOL_DATA_START+2);
+			////update GroupIdWeight
+			{
+				if(groupID < MAX_GROUP_NUM)
+					groupIdWeight[groupID] = 0xffff;
+			}
+			for(i=0;i<MAX_DEVICE_NUM;i++)
+			{
+				if(deviceInfo[i].isUsed && deviceInfo[i].addr == addr)
+				{
+					deviceInfo[i].groupId = groupID;
+					break;
+				}
+			}
+			usart2_send(buf+dat_p,dataLen+4);
+		}
+		break;
+	case 0x00022://remove from a group
+		{
+			////in:		addr[2],group ID[2]
+			////out:	errCode[2]
+			unsigned short addr = *(unsigned short*)(buf+dat_p+UART_PROTOCOL_DATA_START);
+			unsigned short groupID = *(unsigned short*)(buf+dat_p+UART_PROTOCOL_DATA_START+2);
+			////update GroupIdWeight
+			{
+				if(groupID < MAX_GROUP_NUM)
+				if(groupIdWeight[groupID] >= 255)
+					groupIdWeight[groupID] -= 255;
+				else
+					groupIdWeight[groupID] = 0;
+			}
+			for(i=0;i<MAX_DEVICE_NUM;i++)
+			{
+				if(deviceInfo[i].isUsed && deviceInfo[i].addr == addr)
+				{
+					deviceInfo[i].groupId = 0;
+					break;
+				}
+			}
+			usart2_send(buf+dat_p,dataLen+4);
+		}
+		break;
+	case 0x00023://read group name
+		{
+			////in:		group ID[2]
+			////out:	errCode[2],groupId[2],groupName[GROUP_NAME_BYTES_GEN]
+			unsigned short groupID = *(unsigned short*)(buf+dat_p+UART_PROTOCOL_DATA_START+0);
+			unsigned short errCode = 0;
+			if(groupID < MAX_GROUP_NUM)
+				memcpy(buf+dat_p+UART_PROTOCOL_DATA_START+4,groupName[groupID],GROUP_NAME_BYTES);
+			else
+				errCode = 1;
+			buf[dat_p+UART_PROTOCOL_DATA_START+0] = errCode;
+			buf[dat_p+UART_PROTOCOL_DATA_START+1] = errCode>>8;
+			buf[dat_p+UART_PROTOCOL_DATA_START+2] = groupID;
+			buf[dat_p+UART_PROTOCOL_DATA_START+3] = groupID>>8;
+			TcpSendCmd(buf,dat_p,MapRetCmdId(cmdID),4+GROUP_NAME_BYTES);
+		}
+		break;
+	case 0x00024://set group name
+		{
+			////in:		group ID[2],group name[16]
+			////out:	errCode[2]
+			unsigned short groupID = *(unsigned short*)(buf+dat_p+UART_PROTOCOL_DATA_START+0);
+			if(groupID < MAX_GROUP_NUM)
+				memcpy(groupName[groupID],buf+dat_p+UART_PROTOCOL_DATA_START+2,GROUP_NAME_BYTES);
+		}
+		break;
+	default:
+		{
+			printf("not supported\r\n");
+		}
+		break;
+	}
+}
+int simple_server(void)
+{  
+    unsigned int plen,dat_p,i1=0,payloadlen=0;
+    signed char cmd;
+	int prevTime=-1,tmp;
+	char ledCtrl = 0;
+	char dhcp_step = 0;
+	int hdcp_time = 0;
+	int i;
+	unsigned char crc8;
+    
+	init_ip_arp_udp_tcp(mymac,myip,mywwwport);
+    printf("         MAC地址:0x%x,0x%x,0x%x,0x%x,0x%x,0x%x\r\n",mymac[0],mymac[1],mymac[2],mymac[3],mymac[4],mymac[5]);
+    printf("         IP地址:%d.%d.%d.%d\r\n",myip[0],myip[1],myip[2],myip[3]);
+    printf("         端口号:%d\r\n",mywwwport);
+
+	for(i=0;i<MAX_GROUP_NUM;i++)
+		groupIdWeight[i] = 0xffff;
+
+	crc8 = CRC8_Table((unsigned char*)&deviceInfo[0],sizeof(deviceInfo[0]));
+	for(i=0;i<MAX_DEVICE_NUM;i++);
+		deviceInfo[i].crc8 = crc8;
+
+	////read info/////////////////////////////////////////////////////////
+	EE_Init();
+	for(i=0;i<sizeof(groupName);i+=PAGE_SIZE)
+		EE_ReadData(EEPROM_START_ADDRESS+i, (unsigned char*)groupName+i, PAGE_SIZE);
+	if(1)
+	{
+		printf("group name=\r\n");
+		for(i=0;i<MAX_GROUP_NUM;i++)
+		{
+			memcpy(buf1,groupName[i],GROUP_NAME_BYTES);
+			buf1[GROUP_NAME_BYTES] = 0;
+			printf("group[%d]=%s\r\n",i,buf1);
+		}
+	}
+
+	//init the ethernet/ip layer:
+    while(1)
+    {
+		tmp = timeCnt / 1000;
+		if(prevTime != tmp)
+		{
+			prevTime = tmp;
+			if(ledCtrl)
+				GPIO_ResetBits(GPIOF, GPIO_Pin_7);
+			else
+				GPIO_SetBits(GPIOF, GPIO_Pin_7);
+		}
+		/*
+		////uart receive process
+		if(timeCnt > RxTime + 5)
+		{
+			if(RxCounter1)
+			{
+				enc28j60PacketSend(RxCounter1,RxBuffer1);
+				RxCounter1 = 0;
+			}
+		}
+		*/
+		//if(dhcp_step == 0)
+		if(hdcp_time < prevTime)
+		{
+			dhcp_step = 1;
+			////start DHCP discover
+			//make_udp_hdcp_discover(buf);
+			
+			hdcp_time = prevTime + 4;
+		}
+		if(RxCounter2 > 0 && timeCnt > RxTime2 + 5)
+		{
+			RxCounter2Copy = RxCounter2;
+			memcpy(RxBuffer2Copy,RxBuffer2,RxCounter2Copy);
+			RxCounter2 = 0;
+			if(1)
+			{
+				printf("usart2 received=%d\r\n",RxCounter2Copy);
+				for(i=0;i<RxCounter2Copy;i++)
+				{
+					printf("%02x ",RxBuffer2Copy[i]);
+					if(i%8 == 7)
+						printf(" ");
+					if(i%16 == 15)
+						printf("\r\n");
+				}
+				printf("\r\n");
+			}
+			ProcessUartMsg(RxBuffer2Copy,RxCounter2Copy);
+		}
+		
+		
+        //判断是否有接收到有效的包
+        plen = enc28j60PacketReceive(BUFFER_SIZE, buf);
+        //如果收到有效的包，plen将为非0值。
+        if(plen==0)
+        {
+            continue; //没有收到有效的包就退出重新检测
+        }
+		if(0)
+		{
+			printf("received=%d\r\n",plen);
+			for(i=0;i<plen;i++)
+			{
+				printf("%02x ",buf[i]);
+				if(i%8 == 7)
+					printf(" ");
+				if(i%16 == 15)
+					printf("\r\n");
+			}
+			printf("\r\n");
+			//continue;
+		}
+		//当收到目的地址为本机IP的ARP包时，发出ARP相应包
+        if(eth_type_is_arp_and_my_ip(buf,plen))
+        {
+			make_arp_answer_from_request(buf);
+            continue;
+        }
+        
+        //判断是否接收到目的地址为本机IP的合法的IP包
+        if(eth_type_is_ip_and_my_ip(buf,plen)==0) 
+        {
+            continue;
+        }
+        //如果收到ICMP包
+        if(buf[IP_PROTO_P]==IP_PROTO_ICMP_V && buf[ICMP_TYPE_P]==ICMP_TYPE_ECHOREQUEST_V)
+        {
+
+            printf("收到主机[%d.%d.%d.%d]发送的ICMP包\r\n",buf[ETH_ARP_SRC_IP_P],buf[ETH_ARP_SRC_IP_P+1],
+                                                           buf[ETH_ARP_SRC_IP_P+2],buf[ETH_ARP_SRC_IP_P+3]);
+			make_echo_reply_from_request(buf, plen);
+			continue;
+        }
+		if(1)
+		{
+			printf("received=%d\r\n",plen);
+			for(i=0;i<plen;i++)
+			{
+				printf("%02x ",buf[i]);
+				if(i%8 == 7)
+					printf(" ");
+				if(i%16 == 15)
+					printf("\r\n");
+			}
+			printf("\r\n");
+			//continue;
+		}
+        
+        //如果收到TCP包，且端口为80
+		if (buf[IP_PROTO_P]==IP_PROTO_TCP_V
+			&&((buf[TCP_DST_PORT_H_P]<<8) | buf[TCP_DST_PORT_L_P])==mywwwport)
+		{
+		    printf("神舟III号接收到TCP包，端口为%d。\r\n",mywwwport);
+            if (buf[TCP_FLAGS_P] & TCP_FLAGS_SYN_V)
+			{
+			    printf("包类型为SYN\r\n");
+                make_tcp_synack_from_syn(buf);
+                continue;
+            }
+	        if (buf[TCP_FLAGS_P] & TCP_FLAGS_ACK_V)
+			{
+				unsigned char isValid = FALSE;
+			    printf("包类型为ACK\r\n");
+	            init_len_info(buf); // init some data structures
+	            dat_p=get_tcp_data_pointer();
+				if (dat_p != 0)
+			    	printf("data[%d]=%s\r\n",dat_p,(char*)&buf[dat_p]);
+	            if (dat_p==0)
+				{
+	                if (buf[TCP_FLAGS_P] & TCP_FLAGS_FIN_V)
+					{
+	                    make_tcp_ack_from_any(buf);/*发送响应*/
+	                }
+	                // 发送一个没有数据的ACK响应，等待下一个包
+	                continue;
+	            }
+				//if (strncmp("GET ",(char *)&(buf[dat_p]),4)!=0)
+				//{
+			        // 如果是Telnet方式登录，返回如下提示信息
+			        //plen=fill_tcp_data_p(buf,0,PSTR("神舟III号\r\n\n\rHTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n<h1>200 OK</h1>"));
+			        //goto SENDTCP;
+				//}
+				//check valid
+				{
+					int dataLen;
+					i = dat_p;
+					if(buf[i] == 0xAA)
+					{
+						dataLen = buf[i+1];
+						if(i+3+dataLen<plen && buf[i+3+dataLen] == 0x55)
+						{
+							isValid = 1;
+						}
+					}
+				}
+				make_tcp_ack_from_any(buf); // send ack for http get
+				printf("isValid=%d\r\n",isValid);
+				if(isValid)
+				{
+					ProcessTcpMsg(buf,dat_p);
+				}
+				
+			}
+		}
+
+	    //UDP包，监听1200端口的UDP包
+		if (buf[IP_PROTO_P]==IP_PROTO_UDP_V&&buf[UDP_DST_PORT_H_P]==4&&buf[UDP_DST_PORT_L_P]==0xb0)
+		{
+			payloadlen=	  buf[UDP_LEN_H_P];
+			payloadlen=payloadlen<<8;
+			payloadlen=(payloadlen+buf[UDP_LEN_L_P])-UDP_HEADER_LEN;
+	
+            //ANSWER
+            for(i1=0; i1<payloadlen; i1++)
+            {         
+                buf1[i1]=buf[UDP_DATA_P+i1];
+            }
+			
+			//make_udp_reply_from_request(buf,str,strlen(str),myudpport);
+			//make_udp_reply_from_request(buf,buf1,payloadlen,myudpport);
+		}
+	}
+}
+#if 0
+#endif

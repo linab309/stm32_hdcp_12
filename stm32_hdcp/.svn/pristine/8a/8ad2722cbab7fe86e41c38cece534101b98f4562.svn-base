@@ -1,0 +1,8 @@
+#ifndef _STM32_BR100_H_DCFA8E07_4EDE_4F39_B79D_69307C55AD92
+#define _STM32_BR100_H_DCFA8E07_4EDE_4F39_B79D_69307C55AD92
+
+
+#include "stm32_br100_led.h"
+#include "stm32_br100_uart.h"
+
+#endif

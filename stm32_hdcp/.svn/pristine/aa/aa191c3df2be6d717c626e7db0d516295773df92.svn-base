@@ -1,0 +1,5 @@
+#include "uCOS-II/Source/ucos_ii.h"
+#include "uCOS-II/Source/ucos_ii.c"
+#include "uCOS-II/Ports/os_cpu_c.c"
+#include "uCOS-II/Ports/os_dbg.c"
+#include "uCOS-II/stm32f10x_it_ucos.c"

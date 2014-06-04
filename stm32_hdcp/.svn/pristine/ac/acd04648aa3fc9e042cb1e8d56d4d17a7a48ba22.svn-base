@@ -1,0 +1,23 @@
+6、使用printf函数，如果没接串口，会造成程序卡住!!!!!!!!!
+5、需要将keil安装目录\ARM\INC\ST\STM32F10x文件夹删除
+4、Target->code generation->use MicroLib->勾选
+3、include path
+..\;..\..\..\..\Libraries\CMSIS\CM3\CoreSupport;..\..\..\..\Libraries\CMSIS\CM3\DeviceSupport\ST\STM32F10x;..\..\..\..\Libraries\STM32F10x_StdPeriph_Driver\inc;..\..\..\..\Libraries\STM32F10x_StdPeriph_Driver\src;..\..\..\..\Utilities;
+
+..\uCOS-II\Source;..\uCOS-II\uC-CPU;..\uCOS-II\uC-LIB;..\uCOS-II\Ports;
+2、main.c中
+		#include <Utilities.h>
+	lib.c中
+		#define SYSCLK_FREQ_72MHz  72000000
+		#include <Utilities.c>
+		//若使用ucos
+		#define OS_GLOBALS
+		#include <ucos-ii.c>
+	工程中
+		//若使用ucos
+		..\..\..\..\Utilities\uCOS-II\Ports\os_cpu_a.asm
+		..\..\..\..\Utilities\uCOS-II\uC-CPU\cpu_a.asm
+1、define
+	STM32F10X_HD,USE_STDPERIPH_DRIVER
+	,USE_STM3210E_EVAL
+	,USE_STM32_BR100
